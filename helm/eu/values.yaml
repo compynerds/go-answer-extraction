@@ -1,0 +1,56 @@
+name: go-answer-extraction
+namespace: go-answer-extraction
+cluster: euce1
+
+deployment:
+  deployments:
+    survey-worker:
+      name: survey-worker
+      deployAnnotations: {}
+      hpa:
+        minReplicas: 1
+        maxReplicas: 8
+        targetCpuUtilization: 100
+      args:
+        - survey-worker
+      command:
+        - /bin/bash
+        - -c
+      cronjob: {}
+      resources:
+        requests:
+          cpu: 100m
+          memory: 20M
+        limits:
+          cpu: 1000m
+          memory: 1G
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: health-port
+        failureThreshold: 1
+        periodSeconds: 15
+      ports:
+        - name: health-port
+          containerPort: 8080
+      volumes: {}
+      volumeMounts: {}
+
+  image:
+    name: 560540773292.dkr.ecr.us-east-1.amazonaws.com/go-answer-extraction
+    # tag: --set in helm install
+  kind: Deployment
+  restartPolicy: Always
+  podAnnotations: {}
+  labels: {}
+  volumes: {}
+  volumeMounts: {}
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 0
+  affinity: {}
+
+secrets: {}
+
+configmaps: {}

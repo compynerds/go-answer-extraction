@@ -1,0 +1,105 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, prod]
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -mod=vendor
+      GOPROXY: "https://proxy.golang.org,direct"
+
+    steps:
+      - name: Set DEPLOY_ENV Stage
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "DEPLOY_ENV=stage" >> $GITHUB_ENV
+          mkdir ~/.kube
+          echo "${{ secrets.RUM_KUBE_CONFIG }}" > ~/.kube/config
+
+      - name: Set DEPLOY_ENV Prod
+        if: github.ref == 'refs/heads/prod'
+        run: |
+          echo "DEPLOY_ENV=prod" >> $GITHUB_ENV
+          mkdir ~/.kube
+          echo "${{ secrets.WHISKEY_KUBE_CONFIG }}" > ~/.kube/config
+
+      - name: Print
+        run: echo "Deploying to $DEPLOY_ENV"
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v2
+        with:
+          go-version: '1.22'
+        id: go
+
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v1
+
+      - name: Check out helm templates
+        uses: actions/checkout@v2
+        with:
+          repository: nuvi/helm-templates
+          path: helm-templates
+          ref: v1.9.3
+          token: ${{ secrets.NUVIBOT_REPO_PAT }}
+
+      - name: Move Templates
+        run: mv helm-templates/templates helm/templates
+
+      - name: Build
+        run: make build
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/${GITHUB_REPOSITORY#*/}:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/${GITHUB_REPOSITORY#*/}:$IMAGE_TAG
+
+      - name: Logout of Amazon ECR
+        if: always()
+        run: docker logout ${{ steps.login-ecr.outputs.registry }}
+
+      - name: Install aws-iam-authenticator
+        run: |
+          curl -LO https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.5.7/aws-iam-authenticator_0.5.7_linux_amd64
+          mkdir ~/.aws_iam
+          mv ./aws-iam-authenticator_0.5.7_linux_amd64 ~/.aws_iam/aws-iam-authenticator
+          chmod 755 ~/.aws_iam/aws-iam-authenticator
+          echo "$HOME/.aws_iam" >> $GITHUB_PATH
+
+      - name: Setup helm
+        uses: azure/setup-helm@v1
+        with:
+          version: "v3.8.2"
+        id: install
+
+      - name: Setup helm-secrets
+        run: |
+          helm plugin install https://github.com/jkroepke/helm-secrets --version v3.8.2
+          
+      - name: Setup SOPS for helm secrets
+        uses: mdgreenwald/mozilla-sops-action@v1.2.0
+        with:
+          id: install
+
+      - name: Deploy Helm
+        run: |
+          helm secrets upgrade --install --create-namespace ${GITHUB_REPOSITORY#*/} ./helm --namespace ${GITHUB_REPOSITORY#*/} -f helm/$DEPLOY_ENV/values.yaml -f helm/$DEPLOY_ENV/secrets.yaml --debug --set deployment.image.tag=$GITHUB_SHA
+          kubectl get deploy -n ${GITHUB_REPOSITORY#*/} --no-headers -o custom-columns=":metadata.name" | xargs -n 1 kubectl rollout status -n ${GITHUB_REPOSITORY#*/} deploy
